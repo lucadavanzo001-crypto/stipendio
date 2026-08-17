@@ -296,7 +296,8 @@
       <div class="logo-mark">S</div>
       <div class="logo-text">Saldo</div>
     </div>
-    <div class="status-pill" id="storageStatus"><span class="status-dot"></span><span id="storageStatusText">verifica salvataggio…</span></div>
+    <div class="status-pill" id="storageStatus"><span class="status-dot"></span><span id="storageStatusText">verifica sync…</span></div>
+    <button class="btn ghost small" id="btnRefresh" style="margin-left:8px;padding:6px 12px;">↻ Aggiorna</button>
   </div>
 
   <div class="balance-card">
@@ -518,57 +519,78 @@
     toastTimer = setTimeout(()=>{ t.className = 'toast'; }, 4500);
   }
 
-  // ---------- Storage (localStorage — per uso standalone, es. GitHub Pages) ----------
-  const LS_PREFIX = 'saldo_app_';
-  const storage = {
-    async set(key, value){
-      try{ localStorage.setItem(LS_PREFIX + key, value); return true; }
-      catch(e){ throw e; }
-    },
-    async get(key){
-      const v = localStorage.getItem(LS_PREFIX + key);
-      return v === null ? null : { value: v };
-    }
-  };
+  // ---------- Storage (JSONBin.io — dati condivisi tra dispositivi) ----------
+  const JSONBIN_ID = '6a837b69da38895dfef0419e';
+  const JSONBIN_KEY = '$2a$10$zgVLFcFl8J7xKYa4VwjSOuldwKcpzdYegde0IQu4Y4omicIAyNJii';
+  const JSONBIN_URL = `https://api.jsonbin.io/v3/b/${JSONBIN_ID}`;
 
-  async function saveWithRetry(key, value, attempts=3){
-    for(let i=0;i<attempts;i++){
-      try{
-        await storage.set(key, value);
-        setStorageStatus(true);
-        return true;
-      }catch(e){
-        console.error(`Tentativo ${i+1}/${attempts} fallito per "${key}"`, e);
-        if(i < attempts-1) await new Promise(r=>setTimeout(r, 500*(i+1)));
-      }
+  async function jsonbinGet(){
+    const res = await fetch(JSONBIN_URL + '/latest', {
+      headers: { 'X-Master-Key': JSONBIN_KEY }
+    });
+    if(!res.ok) throw new Error('JSONBin GET failed: ' + res.status);
+    const data = await res.json();
+    return data.record || {};
+  }
+  async function jsonbinPut(record){
+    const res = await fetch(JSONBIN_URL, {
+      method: 'PUT',
+      headers: { 'Content-Type':'application/json', 'X-Master-Key': JSONBIN_KEY },
+      body: JSON.stringify(record)
+    });
+    if(!res.ok) throw new Error('JSONBin PUT failed: ' + res.status);
+    return true;
+  }
+
+  async function saveAll(){
+    const record = { transactions, receipts, budgets, goal, updatedAt: new Date().toISOString() };
+    let ok = false;
+    for(let i=0;i<3;i++){
+      try{ await jsonbinPut(record); ok = true; break; }
+      catch(e){ console.error(`Tentativo sync ${i+1}/3 fallito`, e); if(i<2) await new Promise(r=>setTimeout(r,600*(i+1))); }
     }
-    setStorageStatus(false);
-    showToast('⚠ Salvataggio non riuscito. I dati restano visibili ora: usa "Backup JSON" per non perderli.', true);
-    return false;
+    setStorageStatus(ok);
+    if(!ok) showToast('⚠ Sincronizzazione non riuscita. Riprova o usa "Backup JSON".', true);
+    return ok;
   }
   function setStorageStatus(ok){
     const pill = $('storageStatus'); const txt = $('storageStatusText');
     pill.classList.remove('ok','bad');
-    if(ok === null){ txt.textContent = 'verifica salvataggio…'; }
-    else if(ok){ pill.classList.add('ok'); txt.textContent = 'salvataggio attivo (su questo dispositivo)'; }
-    else { pill.classList.add('bad'); txt.textContent = 'salvataggio non disponibile'; }
+    if(ok === null){ txt.textContent = 'sincronizzazione…'; }
+    else if(ok){ pill.classList.add('ok'); txt.textContent = 'sincronizzato'; }
+    else { pill.classList.add('bad'); txt.textContent = 'sync non disponibile'; }
   }
   async function checkStorageHealth(){
-    try{ await storage.set('__health_check__', String(Date.now())); setStorageStatus(true); }
+    try{ await jsonbinGet(); setStorageStatus(true); }
     catch(e){ setStorageStatus(false); }
   }
-  async function saveTransactions(){ await saveWithRetry('transactions', JSON.stringify(transactions)); }
-  async function saveReceipts(){ await saveWithRetry('receipts', JSON.stringify(receipts)); }
-  async function saveBudgets(){ await saveWithRetry('budgets', JSON.stringify(budgets)); }
-  async function saveGoal(){ await saveWithRetry('goal', JSON.stringify(goal)); }
+  async function saveTransactions(){ await saveAll(); }
+  async function saveReceipts(){ await saveAll(); }
+  async function saveBudgets(){ await saveAll(); }
+  async function saveGoal(){ await saveAll(); }
 
   async function loadData(){
-    try{ const t = await storage.get('transactions'); transactions = t ? JSON.parse(t.value) : []; }catch(e){ transactions = []; }
-    try{ const r = await storage.get('receipts'); receipts = r ? JSON.parse(r.value) : []; }catch(e){ receipts = []; }
-    try{ const b = await storage.get('budgets'); budgets = b ? JSON.parse(b.value) : {}; }catch(e){ budgets = {}; }
-    try{ const g = await storage.get('goal'); goal = g ? JSON.parse(g.value) : null; }catch(e){ goal = null; }
+    try{
+      const record = await jsonbinGet();
+      transactions = Array.isArray(record.transactions) ? record.transactions : [];
+      receipts = Array.isArray(record.receipts) ? record.receipts : [];
+      budgets = record.budgets && typeof record.budgets === 'object' ? record.budgets : {};
+      goal = record.goal || null;
+      setStorageStatus(true);
+    }catch(e){
+      console.error('Errore caricamento dati condivisi', e);
+      transactions = []; receipts = []; budgets = {}; goal = null;
+      setStorageStatus(false);
+      showToast('⚠ Impossibile caricare i dati condivisi. Verifica la connessione.', true);
+    }
     populatePeriodSelect();
     render();
+  }
+
+  async function refreshFromCloud(){
+    showToast('Aggiornamento in corso…');
+    await loadData();
+    showToast('✓ Dati aggiornati');
   }
 
   // ---------- Categories ----------
@@ -966,9 +988,10 @@
     if(activePanel === 'panoramica') renderChart();
   }
 
+  $('btnRefresh').addEventListener('click', refreshFromCloud);
+
   renderTips();
   loadData();
-  checkStorageHealth();
 })();
 </script>
 </body>
